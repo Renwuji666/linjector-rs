@@ -1,4 +1,4 @@
-use proc_maps::{get_process_maps, MapRange, Pid};
+use std::path::{Path, PathBuf};
 
 use crate::{remote_mem::RemoteMem, remote_module::RemoteModule, InjectionError};
 
@@ -7,19 +7,79 @@ pub(crate) struct RemoteProc {
     pub mem: RemoteMem,
 }
 
+#[derive(Clone, Debug)]
+struct ProcMap {
+    start: usize,
+    size: usize,
+    offset: usize,
+    filename: Option<PathBuf>,
+}
+
+impl ProcMap {
+    fn start(&self) -> usize {
+        self.start
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn filename(&self) -> Option<&Path> {
+        self.filename.as_deref()
+    }
+}
+
 impl RemoteProc {
     pub fn new(pid: i32) -> Result<Self, InjectionError> {
         let mem = RemoteMem::new(pid)?;
         Ok(Self { pid, mem })
     }
 
-    fn maps(&self) -> Result<Vec<MapRange>, InjectionError> {
-        get_process_maps(self.pid as Pid).map_err(|_| InjectionError::RemoteProcessError)
+    fn parse_map_line(line: &str) -> Option<ProcMap> {
+        let mut parts = line.split_whitespace();
+
+        let range = parts.next()?;
+        let _perms = parts.next()?;
+        let offset_hex = parts.next()?;
+        let _dev = parts.next()?;
+        let _inode = parts.next()?;
+        let filename = parts.next().map(PathBuf::from);
+
+        let (start_hex, end_hex) = range.split_once('-')?;
+        let start = usize::from_str_radix(start_hex, 16).ok()?;
+        let end = usize::from_str_radix(end_hex, 16).ok()?;
+        if end < start {
+            return None;
+        }
+
+        let offset = usize::from_str_radix(offset_hex, 16).ok()?;
+
+        Some(ProcMap {
+            start,
+            size: end - start,
+            offset,
+            filename,
+        })
     }
 
-    fn maps_by_name(&self, name: &str) -> Result<Vec<MapRange>, InjectionError> {
+    fn maps(&self) -> Result<Vec<ProcMap>, InjectionError> {
+        let maps_path = format!("/proc/{}/maps", self.pid);
+        let maps = std::fs::read_to_string(maps_path)
+            .map_err(|_| InjectionError::RemoteProcessError)?
+            .lines()
+            .filter_map(Self::parse_map_line)
+            .collect::<Vec<_>>();
+
+        if maps.is_empty() {
+            return Err(InjectionError::RemoteProcessError);
+        }
+
+        Ok(maps)
+    }
+
+    fn maps_by_name(&self, name: &str) -> Result<Vec<ProcMap>, InjectionError> {
         let maps = self.maps()?;
-        let mut maps_by_name: Vec<MapRange> = Vec::new();
+        let mut maps_by_name: Vec<ProcMap> = Vec::new();
         for map in maps {
             match map.filename() {
                 None => continue,
@@ -53,8 +113,13 @@ impl RemoteProc {
 
     pub fn module(&self, module_name: &str) -> Result<RemoteModule, InjectionError> {
         let maps = self.maps_by_name(module_name)?;
+        let filename = maps[0]
+            .filename()
+            .ok_or(InjectionError::ModuleNotFound)?
+            .to_str()
+            .ok_or(InjectionError::ModuleNotFound)?;
         Ok(RemoteModule::new(
-            maps[0].filename().unwrap().to_str().unwrap(),
+            filename,
             maps[0].start(),
             self.module_bytes(module_name)?,
         ))
