@@ -1,0 +1,46 @@
+name: Cloud Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  android-aarch64-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build release binary
+        run: cargo ndk --target aarch64-linux-android build --release
+
+      - name: Prepare artifact files
+        run: |
+          cp target/aarch64-linux-android/release/linjector-cli linjector-cli
+          sha256sum linjector-cli > SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linjector-aarch64-android
+          path: |
+            linjector-cli
+            SHA256SUMS.txt
+          if-no-files-found: error
