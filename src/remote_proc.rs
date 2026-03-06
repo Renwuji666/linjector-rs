@@ -64,8 +64,9 @@ impl RemoteProc {
 
     fn maps(&self) -> Result<Vec<ProcMap>, InjectionError> {
         let maps_path = format!("/proc/{}/maps", self.pid);
-        let maps = std::fs::read_to_string(maps_path)
-            .map_err(|_| InjectionError::RemoteProcessError)?
+        let maps_raw = std::fs::read(maps_path).map_err(|_| InjectionError::RemoteProcessError)?;
+        let maps_text = String::from_utf8_lossy(&maps_raw);
+        let maps = maps_text
             .lines()
             .filter_map(Self::parse_map_line)
             .collect::<Vec<_>>();
